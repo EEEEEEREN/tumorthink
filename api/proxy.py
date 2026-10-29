@@ -25,12 +25,17 @@ class handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length > 0 else b"{}"
 
-        # 归一化路径：/api/run -> /run, /api/export_report -> /export_report
+        # 归一化路径：/api/run -> /run, /api/stream_run -> /stream_run, /api/export_report -> /export_report
         path = self.path
         if path.startswith("/api/"):
             path = path[len("/api"):]  # "/api/run" -> "/run"
         if not path.startswith("/"):
             path = "/" + path
+
+        # 流式接口（SSE）：边读后端边转发，让前端实时显示
+        if path.endswith("/stream_run"):
+            self._stream(path, body)
+            return
 
         try:
             req = urllib.request.Request(
@@ -53,6 +58,50 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             msg = json.dumps({"error": "代理转发失败: " + str(e)}).encode("utf-8")
             self._respond(502, "application/json", msg)
+
+    def _stream(self, path, body):
+        # 流式转发 SSE，避免缓冲，让前端边收边更新
+        try:
+            req = urllib.request.Request(
+                BACKEND + path,
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + TOKEN,
+                },
+            )
+            resp = urllib.request.urlopen(req, timeout=300)
+        except urllib.error.HTTPError as e:
+            data = e.read()
+            self._respond(e.code, "application/json", data)
+            return
+        except Exception as e:
+            msg = json.dumps({"error": "流式连接失败: " + str(e)}).encode("utf-8")
+            self._respond(502, "application/json", msg)
+            return
+
+        self.send_response(resp.getcode())
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        try:
+            while True:
+                chunk = resp.read1(4096)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except Exception:
+            pass
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
 
     def _respond(self, status, ctype, data):
         self.send_response(status)
