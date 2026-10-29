@@ -73,6 +73,7 @@
 <div class="top">
   <h1>🫁 肿瘤图像智能分析助手</h1>
   <p>上传 jpg / png / pdf → AI 思维链(COT)分析 → 一键下载 PDF 报告</p>
+  <p style="opacity:.9;margin-top:6px">⚙️ 当前大模型：<b>豆包 Seed Lite 2.0</b>（轻量快速版）</p>
 </div>
 
 <div class="wrap">
@@ -98,7 +99,9 @@
 
   <div class="card" id="loading">
     <div id="spinner"></div>
-    AI 正在分步分析（思维链推理），请稍候…
+    <div style="font-size:14px;color:#1e293b">AI 正在分步分析（思维链推理）…</div>
+    <div id="steps" style="margin-top:12px;text-align:left;font-size:13px;color:#33475b;line-height:2"></div>
+    <div id="streamPreview" style="margin-top:12px;text-align:left;font-size:13px;color:#5a6b7f;white-space:pre-wrap;max-height:200px;overflow:auto;border-top:1px dashed #d8e0ea;padding-top:10px"></div>
   </div>
 
   <div class="card" id="result">
@@ -185,29 +188,105 @@
     document.getElementById('loading').style.display='block';
     document.getElementById('result').style.display='none';
     document.getElementById('analyzeBtn').disabled = true;
+    var stepsEl = document.getElementById('steps');
+    var spEl = document.getElementById('streamPreview');
+    stepsEl.innerHTML = '';
+    spEl.textContent = '';
 
-    fetch(BASE + '/run', {
+    // 预置思维链步骤清单，实时点亮进度
+    var steps = [
+      '步骤1 · 图像整体观察',
+      '步骤2 · 病灶定位与轮廓',
+      '步骤3 · 形态特征分析',
+      '步骤4 · 纹理与内部结构',
+      '步骤5 · 综合风险分级',
+      '步骤6 · 建议与就医指引',
+      '生成分析报告…'
+    ];
+    var stepIdx = -1;  // 当前完成到的步骤
+    var streamBuf = '';
+
+    function markDone(kw){
+      var i = steps.findIndex(function(s){ return s.indexOf(kw)>=0; });
+      if (i<0 || i>stepIdx) return;
+      var items = stepsEl.querySelectorAll('div');
+      for (var j=0;j<items.length;j++){
+        if (j<=i) items[j].innerHTML = '<span style="color:#188038">✅</span> '+steps[j];
+      }
+    }
+
+    function renderSteps(box){
+      // 根据已流式内容，勾选已出现的步骤标题
+      steps.forEach(function(s, i){
+        var sdiv = document.createElement('div');
+        sdiv.style.opacity = (i<=stepIdx) ? '1' : '.55';
+        sdiv.textContent = (i<=stepIdx ? '✅ ' : '⏳ ') + s;
+        box.appendChild(sdiv);
+      });
+    }
+
+    // 初步态：全部未开始
+    steps.forEach(function(s){
+      var d=document.createElement('div'); d.style.opacity='.55'; d.textContent='⏳ '+s; stepsEl.appendChild(d);
+    });
+
+    // 核心：流式读取 SSE 并实时渲染
+    fetch(BASE + '/stream_run', {
       method:'POST',
       headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ messages:[{ role:'user', content:content }] })
-    }).then(function(r){ return r.json(); }).then(function(d){
-      if (d.error) throw new Error(d.error);
-      var msgs = d.messages || [];
-      var ai=null;
-      for (var i=msgs.length-1;i>=0;i--){ if(msgs[i].type==='ai' && msgs[i].content){ ai=msgs[i]; break; } }
-      if (!ai) throw new Error('未获取到分析结果，请稍后重试或检查资源点是否充足');
-      var c=ai.content, txt = typeof c==='string' ? c : (Array.isArray(c)? c.map(function(x){return (x&&x.text)?x.text:'';}).join('') : '');
-      if (!txt.trim()) throw new Error('分析结果为空，请在平台充值资源点后再试');
-      lastReport = txt;
-      document.getElementById('loading').style.display='none';
-      document.getElementById('result').style.display='block';
-      renderMarkdown(txt);
+      body: JSON.stringify({ messages:[{ role:'user', content:content }], stream:true })
+    }).then(function(resp){
+      if (!resp.ok) return resp.text().then(function(t){ throw new Error('请求失败: '+resp.status+' '+t.slice(0,120)); });
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      function pump(){
+        return reader.read().then(function(r){
+          if (r.done) { finalize(); return; }
+          buffer += decoder.decode(r.value, { stream:true });
+          // 解析 SSE: 按空行切分事件块
+          var parts = buffer.split('\n\n');
+          buffer = parts.pop();
+          parts.forEach(function(block){
+            var dataLine='';
+            block.split('\n').forEach(function(l){
+              if (l.indexOf('data: ')==0) dataLine = l.slice(6);
+            });
+            if (!dataLine) return;
+            var ev;
+            try { ev = JSON.parse(dataLine); } catch(e){ return; }
+            if (ev.type === 'answer' && ev.content && ev.content.answer){
+              streamBuf += ev.content.answer;
+              spEl.textContent = '正在输出：\n' + streamBuf.slice(-1800);
+              // 识别小节标题，点亮对应步骤
+              var titles = ['图像整体观察','病灶','形态','纹理','风险分级','就医','建议与就医'];
+              titles.forEach(function(t,k){
+                if (streamBuf.indexOf('# '+t)>=0 || streamBuf.indexOf(t)>=0){
+                  if (k>stepIdx) stepIdx=k;
+                  markDone(steps[k]);
+                }
+              });
+            }
+          });
+          return pump();
+        });
+      }
+      function finalize(){
+        lastReport = streamBuf.trim();
+        if (!lastReport) {
+          document.getElementById('resultContent').innerHTML = '<p class="err">❌ 未获取到分析结果，请稍后重试或检查资源点是否充足。</p>';
+        }
+        document.getElementById('loading').style.display='none';
+        document.getElementById('analyzeBtn').disabled = false;
+        document.getElementById('result').style.display='block';
+        renderMarkdown(lastReport);
+      }
+      return pump();
     }).catch(function(err){
       document.getElementById('loading').style.display='none';
+      document.getElementById('analyzeBtn').disabled = false;
       document.getElementById('result').style.display='block';
       document.getElementById('resultContent').innerHTML = '<p class="err">❌ '+esc(err.message)+'</p>';
-    }).finally(function(){
-      document.getElementById('analyzeBtn').disabled = false;
     });
   }
 
