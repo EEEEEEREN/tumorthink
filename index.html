@@ -206,6 +206,25 @@
     var curStepEl = document.getElementById('currentStep');
     curStepEl.style.display = 'block';
     curStepEl.innerHTML = '⏳ 正在准备分析…';
+    // 自动收尾兜底：内容已分析完(出现最后小节标题)且一段时间无新内容时，主动结束，避免"卡在生成分析报告"
+    var reportDone = false;      // 已识别到最后小节(内容基本上已分析完)
+    var lastAppendAt = Date.now();
+    var autoFinalTimer = null;
+    var finalized = false;
+    var wantStop = false;
+
+    function doFinalize(){
+      if (finalized) return; finalized = true;
+      if (autoFinalTimer){ clearTimeout(autoFinalTimer); autoFinalTimer=null; }
+      finalize();
+    }
+    function armAutoFinal(){
+      // 已到最后小节，且超过4.5秒无新内容 → 认为分析完成，主动收尾
+      if (autoFinalTimer){ clearTimeout(autoFinalTimer); }
+      autoFinalTimer = setTimeout(function(){
+        if (reportDone && !wantStop){ doFinalize(); }
+      }, 4500);
+    }
 
     // 只显示当前进行到的一步，说明"具体在干嘛"
     function showCurrentStep(){
@@ -226,7 +245,7 @@
       var buffer = '';
       function pump(){
         return reader.read().then(function(r){
-          if (r.done) { finalize(); return; }
+          if (r.done) { doFinalize(); return; }
           buffer += decoder.decode(r.value, { stream:true });
           // 解析 SSE: 按空行切分事件块
           var parts = buffer.split('\n\n');
@@ -242,7 +261,8 @@
             if (ev.type === 'answer' && ev.content && ev.content.answer){
               streamBuf += ev.content.answer;
               spEl.textContent = '正在输出：\n' + streamBuf.slice(-1800);
-              // 只识别到的大标题为已完成步骤，推进当前进度
+              lastAppendAt = Date.now();
+              // 只识别得到的大标题推进当前步骤
               var titles = ['图像整体观察','病灶','形态','纹理','风险分级','就医','建议与就医'];
               titles.forEach(function(t){
                 if (streamBuf.indexOf('# '+t)>=0 && stepIdx < steps.length){
@@ -250,21 +270,31 @@
                   if (idx >= 0 && idx > stepIdx){ stepIdx = idx; showCurrentStep(); }
                 }
               });
+              // 已出现最后小节(建议与就医) → 内容基本分析完，启动自动收尾兜底
+              if (!reportDone &&
+                  (streamBuf.indexOf('# 建议与就医')>=0 ||
+                   streamBuf.indexOf('# 建议')>=0 ||
+                   streamBuf.indexOf('就医指引')>=0)){
+                reportDone = true;
+              }
+              if (reportDone){ armAutoFinal(); }
             }
           });
           return pump();
         });
       }
       function finalize(){
+        if (autoFinalTimer){ clearTimeout(autoFinalTimer); autoFinalTimer=null; }
         lastReport = streamBuf.trim();
-        if (!lastReport) {
-          document.getElementById('resultContent').innerHTML = '<p class="err">❌ 未获取到分析结果，请稍后重试或检查资源点是否充足。</p>';
-        }
         document.getElementById('loading').style.display='none';
         document.getElementById('analyzeBtn').disabled = false;
         document.getElementById('result').style.display='block';
-        curStepEl.innerHTML = '✅ 分析完成：<b>生成分析报告…</b>';
-        renderMarkdown(lastReport);
+        curStepEl.innerHTML = '✅ 分析完成：<b>生成分析报告</b>';
+        if (!lastReport) {
+          document.getElementById('resultContent').innerHTML = '<p class="err">❌ 未获取到分析结果，请稍后重试或检查资源点是否充足。</p>';
+        } else {
+          renderMarkdown(lastReport);
+        }
       }
       return pump();
     }).catch(function(err){
