@@ -100,7 +100,7 @@
   <div class="card" id="loading">
     <div id="spinner"></div>
     <div style="font-size:14px;color:#1e293b">AI 正在分步分析（思维链推理）…</div>
-    <div id="steps" style="margin-top:12px;text-align:left;font-size:13px;color:#33475b;line-height:2"></div>
+    <div id="currentStep" style="margin-top:14px;text-align:center;font-size:14px;font-weight:600;color:#166534;background:#e9f7ee;border:1px solid #cdeed6;border-radius:10px;padding:12px 16px"></div>
     <div id="streamPreview" style="margin-top:12px;text-align:left;font-size:13px;color:#5a6b7f;white-space:pre-wrap;max-height:200px;overflow:auto;border-top:1px dashed #d8e0ea;padding-top:10px"></div>
   </div>
 
@@ -188,12 +188,10 @@
     document.getElementById('loading').style.display='block';
     document.getElementById('result').style.display='none';
     document.getElementById('analyzeBtn').disabled = true;
-    var stepsEl = document.getElementById('steps');
     var spEl = document.getElementById('streamPreview');
-    stepsEl.innerHTML = '';
     spEl.textContent = '';
 
-    // 预置思维链步骤清单，实时点亮进度
+    // 思维链步骤（按顺序推进），只显示当前进行到的一步
     var steps = [
       '步骤1 · 图像整体观察',
       '步骤2 · 病灶定位与轮廓',
@@ -203,32 +201,18 @@
       '步骤6 · 建议与就医指引',
       '生成分析报告…'
     ];
-    var stepIdx = -1;  // 当前完成到的步骤
+    var stepIdx = -1;  // 当前已推进到的步骤下标
     var streamBuf = '';
+    var curStepEl = document.getElementById('currentStep');
+    curStepEl.style.display = 'block';
+    curStepEl.innerHTML = '⏳ 正在准备分析…';
 
-    function markDone(kw){
-      var i = steps.findIndex(function(s){ return s.indexOf(kw)>=0; });
-      if (i<0 || i>stepIdx) return;
-      var items = stepsEl.querySelectorAll('div');
-      for (var j=0;j<items.length;j++){
-        if (j<=i) items[j].innerHTML = '<span style="color:#188038">✅</span> '+steps[j];
-      }
+    // 只显示当前进行到的一步，说明"具体在干嘛"
+    function showCurrentStep(){
+      var current = (stepIdx>=0 && stepIdx<steps.length) ? steps[stepIdx] : steps[0];
+      curStepEl.innerHTML = '⏳ 当前进行：<b>' + current + '</b>';
     }
-
-    function renderSteps(box){
-      // 根据已流式内容，勾选已出现的步骤标题
-      steps.forEach(function(s, i){
-        var sdiv = document.createElement('div');
-        sdiv.style.opacity = (i<=stepIdx) ? '1' : '.55';
-        sdiv.textContent = (i<=stepIdx ? '✅ ' : '⏳ ') + s;
-        box.appendChild(sdiv);
-      });
-    }
-
-    // 初步态：全部未开始
-    steps.forEach(function(s){
-      var d=document.createElement('div'); d.style.opacity='.55'; d.textContent='⏳ '+s; stepsEl.appendChild(d);
-    });
+    showCurrentStep();
 
     // 核心：流式读取 SSE 并实时渲染
     fetch(BASE + '/stream_run', {
@@ -258,12 +242,12 @@
             if (ev.type === 'answer' && ev.content && ev.content.answer){
               streamBuf += ev.content.answer;
               spEl.textContent = '正在输出：\n' + streamBuf.slice(-1800);
-              // 识别小节标题，点亮对应步骤
+              // 只识别到的大标题为已完成步骤，推进当前进度
               var titles = ['图像整体观察','病灶','形态','纹理','风险分级','就医','建议与就医'];
-              titles.forEach(function(t,k){
-                if (streamBuf.indexOf('# '+t)>=0 || streamBuf.indexOf(t)>=0){
-                  if (k>stepIdx) stepIdx=k;
-                  markDone(steps[k]);
+              titles.forEach(function(t){
+                if (streamBuf.indexOf('# '+t)>=0 && stepIdx < steps.length){
+                  var idx = titles.indexOf(t);
+                  if (idx >= 0 && idx > stepIdx){ stepIdx = idx; showCurrentStep(); }
                 }
               });
             }
@@ -279,6 +263,7 @@
         document.getElementById('loading').style.display='none';
         document.getElementById('analyzeBtn').disabled = false;
         document.getElementById('result').style.display='block';
+        curStepEl.innerHTML = '✅ 分析完成：<b>生成分析报告…</b>';
         renderMarkdown(lastReport);
       }
       return pump();
