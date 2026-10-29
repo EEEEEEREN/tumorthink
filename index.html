@@ -191,45 +191,52 @@
     var spEl = document.getElementById('streamPreview');
     spEl.textContent = '';
 
-    // 思维链步骤（按顺序推进），只显示当前进行到的一步
+    // 思维链步骤（细分，只高亮显示当前一步，并说明具体在干嘛）
     var steps = [
-      '步骤1 · 图像整体观察',
-      '步骤2 · 病灶定位与轮廓',
-      '步骤3 · 形态特征分析',
-      '步骤4 · 纹理与内部结构',
-      '步骤5 · 综合风险分级',
-      '步骤6 · 建议与就医指引',
-      '生成分析报告…'
+      { title:'步骤1 · 图像整体观察',   doing:'正在读取并识别图像，分析图片类型、整体构图与可见结构…' },
+      { title:'步骤2 · 病灶定位与轮廓', doing:'正在定位可疑病灶，评估其方位、大小比例、形状与边界…' },
+      { title:'步骤3 · 形态特征分析',   doing:'正在分析颜色/灰度分布、边界规则度与形态对称性（参考ABCD）…' },
+      { title:'步骤4 · 纹理与内部结构', doing:'正在观察表面纹理、破溃、出血、结痂与内部结构特征…' },
+      { title:'步骤5 · 综合风险分级',   doing:'正在基于可见特征综合判断可疑度，给出低/中/高分级…' },
+      { title:'步骤6 · 建议与就医指引', doing:'正在归纳主要发现，整理检查方式与分科就医建议…' },
+      { title:'已完成分析，整理报告…', doing:'分析内容已全部生成，正在整理最终结果…' }
     ];
     var stepIdx = -1;  // 当前已推进到的步骤下标
     var streamBuf = '';
     var curStepEl = document.getElementById('currentStep');
     curStepEl.style.display = 'block';
     curStepEl.innerHTML = '⏳ 正在准备分析…';
-    // 自动收尾兜底：内容已分析完(出现最后小节标题)且一段时间无新内容时，主动结束，避免"卡在生成分析报告"
-    var reportDone = false;      // 已识别到最后小节(内容基本上已分析完)
-    var lastAppendAt = Date.now();
-    var autoFinalTimer = null;
+
+    // ==== 强健的自动收尾机制（彻底避免"卡在生成分析报告"）====
+    // 1. 空闲超时：距最后一次收到内容超过 IDLE_MS 无新内容 → 自动结束
+    // 2. 总超时：从开始分析起超过 TOTAL_MS 仍未结束 → 强制收尾
+    var IDLE_MS = 12000;     // 12 秒无新内容即认为输出完成（兼顾不误截断）
+    var TOTAL_MS = 180000;   // 最多等待 3 分钟，强制收尾兜底
+    var lastDataAt = Date.now();
+    var idleTimer = null;
+    var totalTimer = null;
     var finalized = false;
-    var wantStop = false;
 
     function doFinalize(){
       if (finalized) return; finalized = true;
-      if (autoFinalTimer){ clearTimeout(autoFinalTimer); autoFinalTimer=null; }
+      if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
+      if (totalTimer){ clearTimeout(totalTimer); totalTimer=null; }
       finalize();
     }
-    function armAutoFinal(){
-      // 已到最后小节，且超过4.5秒无新内容 → 认为分析完成，主动收尾
-      if (autoFinalTimer){ clearTimeout(autoFinalTimer); }
-      autoFinalTimer = setTimeout(function(){
-        if (reportDone && !wantStop){ doFinalize(); }
-      }, 4500);
+    function kickIdleTimer(){
+      lastDataAt = Date.now();
+      if (idleTimer){ clearTimeout(idleTimer); }
+      idleTimer = setTimeout(function(){
+        // 已有内容且长时间无新内容 → 判定完成，自动收尾
+        if (!finalized && streamBuf.length > 0){ doFinalize(); }
+      }, IDLE_MS);
     }
+    totalTimer = setTimeout(doFinalize, TOTAL_MS);
 
     // 只显示当前进行到的一步，说明"具体在干嘛"
     function showCurrentStep(){
-      var current = (stepIdx>=0 && stepIdx<steps.length) ? steps[stepIdx] : steps[0];
-      curStepEl.innerHTML = '⏳ 当前进行：<b>' + current + '</b>';
+      var cur = (stepIdx>=0 && stepIdx<steps.length) ? steps[stepIdx] : steps[0];
+      curStepEl.innerHTML = '⏳ 当前进行：<b>' + cur.title + '</b><div style="font-weight:400;font-size:12.5px;color:#556a62;margin-top:5px">' + cur.doing + '</div>';
     }
     showCurrentStep();
 
@@ -260,9 +267,9 @@
             try { ev = JSON.parse(dataLine); } catch(e){ return; }
             if (ev.type === 'answer' && ev.content && ev.content.answer){
               streamBuf += ev.content.answer;
-              spEl.textContent = '正在输出：\n' + streamBuf.slice(-1800);
-              lastAppendAt = Date.now();
-              // 只识别得到的大标题推进当前步骤
+              spEl.textContent = streamBuf.slice(-1600);
+              kickIdleTimer();
+              // 识别到的大标题推进当前步骤
               var titles = ['图像整体观察','病灶','形态','纹理','风险分级','就医','建议与就医'];
               titles.forEach(function(t){
                 if (streamBuf.indexOf('# '+t)>=0 && stepIdx < steps.length){
@@ -270,21 +277,14 @@
                   if (idx >= 0 && idx > stepIdx){ stepIdx = idx; showCurrentStep(); }
                 }
               });
-              // 已出现最后小节(建议与就医) → 内容基本分析完，启动自动收尾兜底
-              if (!reportDone &&
-                  (streamBuf.indexOf('# 建议与就医')>=0 ||
-                   streamBuf.indexOf('# 建议')>=0 ||
-                   streamBuf.indexOf('就医指引')>=0)){
-                reportDone = true;
-              }
-              if (reportDone){ armAutoFinal(); }
             }
           });
           return pump();
         });
       }
       function finalize(){
-        if (autoFinalTimer){ clearTimeout(autoFinalTimer); autoFinalTimer=null; }
+        if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
+        if (totalTimer){ clearTimeout(totalTimer); totalTimer=null; }
         lastReport = streamBuf.trim();
         document.getElementById('loading').style.display='none';
         document.getElementById('analyzeBtn').disabled = false;
@@ -298,6 +298,9 @@
       }
       return pump();
     }).catch(function(err){
+      finalized = true;
+      if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
+      if (totalTimer){ clearTimeout(totalTimer); totalTimer=null; }
       document.getElementById('loading').style.display='none';
       document.getElementById('analyzeBtn').disabled = false;
       document.getElementById('result').style.display='block';
