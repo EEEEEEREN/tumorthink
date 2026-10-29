@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>肿瘤图像智能分析助手</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(160deg, #eef3fb 0%, #f7f9fc 100%);
+    min-height: 100vh;
+    color: #1f2d3d;
+  }
+  .top {
+    background: linear-gradient(90deg, #0f4c81, #1a73e8);
+    color: #fff; padding: 16px 20px;
+  }
+  .top h1 { font-size: 20px; }
+  .top p { font-size: 12px; opacity: .85; margin-top: 4px; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 20px 16px 60px; }
+  .card {
+    background: #fff; border-radius: 14px; box-shadow: 0 4px 18px rgba(15,76,129,.08);
+    padding: 20px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; margin-bottom: 12px; color: #0f4c81; }
+  .uploader {
+    border: 2px dashed #b8cbe0; border-radius: 12px; padding: 26px; text-align: center;
+    cursor: pointer; transition: .2s; background: #fafcff;
+  }
+  .uploader:hover, .uploader.drag { border-color: #1a73e8; background: #f0f6ff; }
+  .uploader .big { font-size: 32px; }
+  .uploader .txt { color: #5a6b7f; margin-top: 6px; font-size: 14px; }
+  .uploader .hint { color: #9aa9ba; font-size: 12px; margin-top: 4px; }
+  #preview { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  .p-item { position: relative; width: 84px; height: 84px; border-radius: 10px; overflow: hidden; background: #eef2f7; }
+  .p-item img { width: 100%; height: 100%; object-fit: cover; }
+  .p-item .pdf {
+    width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #c0392b; font-size: 12px;
+  }
+  .p-item .del {
+    position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; line-height: 18px;
+    text-align: center; background: rgba(0,0,0,.55); color: #fff; border-radius: 50%;
+    font-size: 12px; cursor: pointer;
+  }
+  textarea {
+    width: 100%; min-height: 60px; border: 1px solid #d8e0ea; border-radius: 10px;
+    padding: 10px; font-size: 14px; resize: vertical; font-family: inherit; margin-top: 10px;
+  }
+  .note { font-size: 12px; color: #a06a2a; background: #fff5e6; border-radius: 8px; padding: 10px; margin-top: 12px; line-height: 1.6; }
+  .row { display: flex; gap: 10px; margin-top: 14px; }
+  .btn {
+    flex: 1; border: none; border-radius: 10px; padding: 13px; font-size: 15px; font-weight: 600;
+    cursor: pointer; color: #fff; background: #1a73e8; transition: .2s;
+  }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+  .btn.green { background: #188038; }
+  .btn.gray { background: #e8edf3; color: #1f2d3d; }
+  #result { display: none; }
+  #resultContent { line-height: 1.75; font-size: 14.5px; }
+  #resultContent h3 {
+    font-size: 15px; color: #0f4c81; margin: 14px 0 6px; border-left: 4px solid #1a73e8; padding-left: 8px;
+  }
+  #resultContent p, #resultContent li { font-size: 14px; color: #33475b; margin: 4px 0; }
+  #loading { display: none; text-align: center; color: #1a73e8; padding: 20px; }
+  #spinner { width: 26px; height: 26px; border: 3px solid #dbe4ef; border-top-color: #1a73e8; border-radius: 50%; margin: 0 auto 8px; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .err { color: #d93025; font-size: 14px; }
+  .tip { font-size: 12px; color: #8a97a8; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <h1>🫁 肿瘤图像智能分析助手</h1>
+  <p>上传 jpg / png / pdf → AI 思维链(COT)分析 → 一键下载 PDF 报告</p>
+</div>
+
+<div class="wrap">
+
+  <!-- ============ 令牌设置（部署上线前填写一次） ============ -->
+  <div class="card">
+    <h2>🔑 访问令牌设置</h2>
+    <textarea id="tokenBox" placeholder="在此填入你的平台访问令牌（czs_xxx 开头），然后点击【保存令牌】"></textarea>
+    <div class="row">
+      <button class="btn gray" onclick="saveToken()">保存令牌</button>
+    </div>
+    <div class="tip" id="tokenStatus">尚未设置令牌。</div>
+  </div>
+
+  <!-- ============ 上传与分析 ============ -->
+  <div class="card">
+    <h2>📤 上传图片 / PDF</h2>
+    <div class="uploader" id="uploader" onclick="document.getElementById('fileInput').click()">
+      <div class="big">＋</div>
+      <div class="txt">点击或拖拽选择文件</div>
+      <div class="hint">支持 .jpg / .png / .pdf，可多选</div>
+      <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.pdf" multiple style="display:none" onchange="handleFiles(this.files)" />
+    </div>
+    <div id="preview"></div>
+
+    <textarea id="question" placeholder="补充说明（可选）：如症状部位、出现时间、有关检查结果等"></textarea>
+
+    <div class="note">⚠️ 本工具由 AI 进行图像特征辅助分析，<b>不能作为肿瘤/癌症的诊断依据</b>，请务必携带资料至正规医院（皮肤科 / 影像科 / 病理科）面诊确诊。</div>
+
+    <div class="row">
+      <button class="btn" id="analyzeBtn" onclick="analyze()">开始分析</button>
+    </div>
+  </div>
+
+  <div class="card" id="loading">
+    <div id="spinner"></div>
+    AI 正在分步分析（思维链推理），请稍候…
+  </div>
+
+  <!-- ============ 结果与下载 ============ -->
+  <div class="card" id="result">
+    <h2>📋 分析结果</h2>
+    <div id="resultContent"></div>
+    <div class="row" style="margin-top:16px">
+      <button class="btn green" onclick="downloadPDF()">⬇ 下载 PDF 报告</button>
+      <button class="btn gray" onclick="location.reload()">重新分析</button>
+    </div>
+  </div>
+
+  <div class="tip" style="max-width:860px;margin:0 auto;padding:0 16px">
+    * 分析结果与报告仅作健康参考，请在医生指导下使用。
+  </div>
+</div>
+
+<script>
+  // ====================== 环境配置 ======================
+  var BASE = "https://tumorthink.coze.site";   // 后端服务地址（正式部署域名）
+
+  // 令牌默认读取 localhost 存储；没有则请手动填写
+  var uploads = [];     // {dataUrl, name, isPdf}
+  var lastReport = "";
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var saved = localStorage.getItem('tmt_token');
+    if (saved) {
+      document.getElementById('tokenBox').value = saved;
+      document.getElementById('tokenStatus').textContent = '✅ 已保存令牌。（可在此修改并重新保存）';
+    } else {
+      document.getElementById('tokenStatus').textContent = '⏳ 请填写令牌并点击保存。';
+    }
+    // 拖拽上传
+    var u = document.getElementById('uploader');
+    u.addEventListener('dragover', function (e) { e.preventDefault(); u.classList.add('drag'); });
+    u.addEventListener('dragleave', function () { u.classList.remove('drag'); });
+    u.addEventListener('drop', function (e) {
+      e.preventDefault(); u.classList.remove('drag');
+      if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+    });
+  });
+
+  function getToken() {
+    return (document.getElementById('tokenBox').value || '').trim();
+  }
+  function saveToken() {
+    var t = getToken();
+    if (t) { localStorage.setItem('tmt_token', t); document.getElementById('tokenStatus').textContent = '✅ 已保存令牌。'; }
+    else { document.getElementById('tokenStatus').textContent = '⚠️ 令牌不能为空。'; }
+  }
+
+  function handleFiles(files) {
+    Array.prototype.forEach.call(files, function (f) {
+      if (!f.type.match(/image\/(jpeg|png|jpg)|pdf/)) return;
+      var reader = new FileReader();
+      reader.onload = function (ev) {
+        var isPdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
+        uploads.push({ dataUrl: ev.target.result, name: f.name, isPdf: isPdf });
+        renderPreview();
+      };
+      reader.readAsDataURL(f);
+    });
+  }
+
+  function renderPreview() {
+    var p = document.getElementById('preview');
+    p.innerHTML = '';
+    uploads.forEach(function (u, i) {
+      var d = document.createElement('div'); d.className = 'p-item';
+      if (u.isPdf) {
+        d.innerHTML = '<div class="pdf">📄<br/><span style="font-size:10px">PDF</span></div>';
+      } else {
+        var img = document.createElement('img'); img.src = u.dataUrl;
+        d.appendChild(img);
+      }
+      var del = document.createElement('span'); del.className = 'del'; del.textContent = '×';
+      del.onclick = function () { uploads.splice(i, 1); renderPreview(); };
+      d.appendChild(del);
+      p.appendChild(d);
+    });
+  }
+
+  function esc(s) { var div = document.createElement('div'); div.textContent = s; return div.innerHTML; }
+
+  function renderMarkdown(txt) {
+    var box = document.getElementById('resultContent');
+    box.innerHTML = '';
+    txt.split('\n').forEach(function (line) {
+      var m = line.trim();
+      if (!m) return;
+      if (m.charAt(0) === '#') {
+        var h = document.createElement('h3');
+        h.textContent = m.replace(/^#+\s*/, '');
+        box.appendChild(h);
+      } else if (/^[-*•]\s/.test(m)) {
+        var li = document.createElement('li');
+        li.textContent = m.replace(/^[-*•]\s*/, '');
+        box.appendChild(li);
+      } else {
+        var p = document.createElement('p');
+        p.textContent = m;
+        box.appendChild(p);
+      }
+    });
+  }
+
+  function analyze() {
+    var token = getToken();
+    if (!token) { alert('请先在上方填写并保存你的访问令牌'); return; }
+    if (!uploads.length && !document.getElementById('question').value.trim()) {
+      alert('请至少上传一张图片/PDF，或填写说明'); return;
+    }
+    var q = document.getElementById('question').value.trim() || '请对上传的图片进行 COT 多步分析。';
+    var content = [{ type: 'text', text: q }];
+    uploads.forEach(function (u) {
+      content.push({ type: 'image_url', image_url: { url: u.dataUrl } });
+    });
+
+    showLoading(true); document.getElementById('result').style.display = 'none';
+    document.getElementById('analyzeBtn').disabled = true;
+
+    fetch(BASE + '/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ messages: [{ role: 'user', content: content }] })
+    }).then(function (r) {
+      if (r.status === 401) throw new Error('鉴权失败(401)：令牌无效，请检查访问令牌是否正确');
+      return r.json();
+    }).then(function (d) {
+      var msgs = d.messages || [];
+      var ai = null;
+      for (var i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'ai' && msgs[i].content) { ai = msgs[i]; break; }
+      }
+      if (!ai) throw new Error('未获取到分析结果，请稍后重试或检查资源点是否充足');
+      var c = ai.content;
+      var txt = typeof c === 'string' ? c : '';
+      if (Array.isArray(c)) {
+        txt = c.map(function (x) { return (x && x.text) ? x.text : ''; }).join('');
+      }
+      if (!txt.trim()) throw new Error('分析结果为空，请在平台充值资源点后再试');
+      lastReport = txt;
+      showLoading(false);
+      document.getElementById('result').style.display = 'block';
+      renderMarkdown(txt);
+    }).catch(function (err) {
+      showLoading(false);
+      document.getElementById('result').style.display = 'block';
+      document.getElementById('resultContent').innerHTML = '<p class="err">❌ ' + esc(err.message) + '</p>';
+    }).finally(function () {
+      document.getElementById('analyzeBtn').disabled = false;
+    });
+  }
+
+  function downloadPDF() {
+    var token = getToken();
+    if (!token) { alert('请先填写访问令牌'); return; }
+    if (!lastReport) { alert('请先完成分析'); return; }
+    fetch(BASE + '/export_report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ report: lastReport })
+    }).then(function (r) {
+      if (r.status === 401) throw new Error('鉴权失败(401)');
+      return r.blob();
+    }).then(function (blob) {
+      var a = document.createElement('a');
+      var url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = '肿瘤图像分析报告.pdf';
+      document.body.appendChild(a); a.click();
+      setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    }).catch(function (err) {
+      alert('下载失败：' + err.message);
+    });
+  }
+
+  function showLoading(on) {
+    document.getElementById('loading').style.display = on ? 'block' : 'none';
+  }
+</script>
+</body>
+</html>
