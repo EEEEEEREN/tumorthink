@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/api/run", "destination": "/api/proxy" },
+    { "source": "/api/export_report", "destination": "/api/proxy" }
+  ]
+}
