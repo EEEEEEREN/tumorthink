@@ -73,7 +73,7 @@
 <div class="top">
   <h1>🫁 肿瘤图像智能分析助手</h1>
   <p>上传 jpg / png / pdf → AI 思维链(COT)分析 → 一键下载 PDF 报告</p>
-  <p style="opacity:.9;margin-top:6px">⚙️ 当前大模型：<b>豆包 Seed Lite 2.0</b>（轻量快速版）　·　<span style="opacity:.8">v3.2 自动收尾修复版</span></p>
+  <p style="opacity:.9;margin-top:6px">⚙️ 当前大模型：<b>豆包 Seed Lite 2.0</b>（轻量快速版）　·　<span style="opacity:.8">v4 · 非流式稳定版</span></p>
 </div>
 
 <div class="wrap">
@@ -201,64 +201,9 @@
       { title:'步骤6 · 建议与就医指引', doing:'正在归纳主要发现，整理检查方式与分科就医建议…' }
     ];
     var stepIdx = -1;  // 当前已推进到的步骤下标
-    var streamBuf = '';
     var curStepEl = document.getElementById('currentStep');
     curStepEl.style.display = 'block';
     curStepEl.innerHTML = '⏳ 正在准备分析…';
-
-    // ==== 自动收尾机制（分析内容一旦完整，立即收尾并显示下载按钮）====
-    // 不再依赖"等定时器/等流结束"——那样会因为 Vercel SSE 连接挂着不结束而卡住。
-    // 改为：每次收到数据都同步检测内容是否已完整（命中报告固定结尾），一旦完整立即收尾。
-    // 额外保留空闲超时(12s)与总超时(2.5min)作为兜底，防止结尾标志未命中。
-    var IDLE_MS = 12000;      // 普通阶段空闲超时（兜底，不靠它主动收尾）
-    var TOTAL_MS = 150000;    // 最多等待 2.5 分钟，强制收尾兜底
-    // 报告的固定结尾（COT 提示词强制），命中即认为内容输出完整，立即收尾
-    var COMPLETE_MARKS = ['请务必线下就医确诊','AI 辅助分析，仅供参考','仅供参考，请务必','就医确诊'];
-    var readerRef = null;     // 保存 reader，用于主动取消连接
-    var idleTimer = null, totalTimer = null;
-    var finalized = false;
-    var normalDone = false;    // 是否已正常完成（用于阻止 catch 覆盖报告）
-    var watchdog = null;       // 独立兜底监视器
-
-    function cancelReader(){
-      try { if (readerRef && readerRef.cancel){ readerRef.cancel(); } } catch(e){}
-      readerRef = null;
-    }
-    function doFinalize(){
-      if (finalized) return; finalized = true; normalDone = true;
-      if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
-      if (totalTimer){ clearTimeout(totalTimer); totalTimer=null; }
-      if (watchdog){ clearInterval(watchdog); watchdog=null; }
-      cancelReader();
-      finalize();
-    }
-    function isComplete(){
-      if (streamBuf.length===0) return false;
-      for (var i=0;i<COMPLETE_MARKS.length;i++){
-        if (streamBuf.indexOf(COMPLETE_MARKS[i])>=0) return true;
-      }
-      return false;
-    }
-    function checkComplete(){
-      // 关键：同步检测内容是否已完整，一完整立即收尾，绝不拖延
-      if (!finalized && isComplete()){ doFinalize(); }
-    }
-    function armIdle(){
-      checkComplete();                       // 先同步收尾（当内容已完整）
-      if (finalized) return;
-      if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
-      idleTimer = setTimeout(function(){
-        if (finalized) return;
-        if (streamBuf.length===0) return;    // 尚无内容，继续等待
-        doFinalize();                        // 空闲兜底
-      }, IDLE_MS);
-    }
-    totalTimer = setTimeout(doFinalize, TOTAL_MS);
-    // 终极兜底：每秒检查一次内容完整性，独立于 SSE 读取循环。
-    // 即使 Vercel 连接挂着 / reader.read() 不返回，只要内容已完整(含结尾标志)就立即收尾。
-    watchdog = setInterval(function(){
-      checkComplete();
-    }, 1000);
 
     // 只显示当前进行到的一步，说明"具体在干嘛"
     function showCurrentStep(){
@@ -267,73 +212,51 @@
     }
     showCurrentStep();
 
-    // 核心：流式读取 SSE 并实时渲染
-    fetch(BASE + '/stream_run', {
+    // 等待期间按时间推进步骤动画，让用户实时感知"在干嘛"
+    var PROGRESS_STEP_MS = parseInt(spEl.getAttribute('data-step') || '0', 10) || 2600;
+    var stepTimer = setInterval(function(){
+      if (stepIdx < steps.length-1){ stepIdx++; showCurrentStep(); }
+    }, PROGRESS_STEP_MS);
+
+    // ==== 非流式方案（最可靠）====
+    // 一次请求拿回完整报告，不依赖 SSE 流的 EOF 传递，
+    // 从根本上杜绝"内容已显示完但界面卡在等待流结束"的问题。
+    // 请求返回即代表分析完成，立即渲染全文并显示下载按钮。
+    fetch(BASE + '/run', {
       method:'POST',
       headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ messages:[{ role:'user', content:content }], stream:true })
+      body: JSON.stringify({ messages:[{ role:'user', content:content }] })
     }).then(function(resp){
-      if (!resp.ok) return resp.text().then(function(t){ throw new Error('请求失败: '+resp.status+' '+t.slice(0,120)); });
-      var reader = resp.body.getReader();
-      readerRef = reader;
-      var decoder = new TextDecoder();
-      var buffer = '';
-      function pump(){
-        return reader.read().then(function(r){
-          if (r.done) { doFinalize(); return; }
-          buffer += decoder.decode(r.value, { stream:true });
-          // 解析 SSE: 按空行切分事件块
-          var parts = buffer.split('\n\n');
-          buffer = parts.pop();
-          parts.forEach(function(block){
-            var dataLine='';
-            block.split('\n').forEach(function(l){
-              if (l.indexOf('data: ')==0) dataLine = l.slice(6);
-            });
-            if (!dataLine) return;
-            var ev;
-            try { ev = JSON.parse(dataLine); } catch(e){ return; }
-            if (ev.type === 'answer' && ev.content && ev.content.answer){
-              streamBuf += ev.content.answer;
-              spEl.textContent = streamBuf.slice(-1600);
-              armIdle();
-              // 识别到的大标题推进当前步骤（6步与 titles 一一对应）
-              var titles = ['图像整体观察','病灶','形态','纹理','风险分级','就医'];
-              titles.forEach(function(t){
-                if (streamBuf.indexOf('# '+t)>=0 && stepIdx < titles.length){
-                  var idx = titles.indexOf(t);
-                  if (idx >= 0 && idx > stepIdx){ stepIdx = idx; showCurrentStep(); }
-                }
-              });
-              // 命中"建议与就医"等同最后一步
-              if (stepIdx < 5 && (streamBuf.indexOf('建议与就医')>=0 || streamBuf.indexOf('# 建议')>=0)){
-                stepIdx = 5; showCurrentStep();
-              }
-            }
-          });
-          return pump();
-        });
-      }
-      function finalize(){
-        if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
-        if (totalTimer){ clearTimeout(totalTimer); totalTimer=null; }
-        lastReport = streamBuf.trim();
-        document.getElementById('loading').style.display='none';
-        document.getElementById('analyzeBtn').disabled = false;
-        document.getElementById('result').style.display='block';
-        curStepEl.innerHTML = '✅ 分析完成：<b>生成分析报告</b>';
-        if (!lastReport) {
-          document.getElementById('resultContent').innerHTML = '<p class="err">❌ 未获取到分析结果，请稍后重试或检查资源点是否充足。</p>';
-        } else {
-          renderMarkdown(lastReport);
+      if (!resp.ok) return resp.text().then(function(t){ throw new Error('请求失败: '+resp.status+' '+(t||'').slice(0,120)); });
+      return resp.json();
+    }).then(function(data){
+      if (stepTimer){ clearInterval(stepTimer); stepTimer=null; }
+      // 从返回的 messages 中提取最后一条 AI 消息的内容（即完整报告 markdown）
+      var report = '';
+      var msgs = (data && data.messages) ? data.messages : [];
+      for (var i=msgs.length-1;i>=0;i--){
+        var m = msgs[i];
+        if (m && m.type==='ai'){
+          var c = m.content;
+          if (typeof c === 'string'){ report = c; break; }
+          if (Array.isArray(c)){ report = c.map(function(cc){ return (cc && cc.text) ? cc.text : ''; }).join('').trim(); if (report) break; }
         }
       }
-      return pump();
+      lastReport = report.trim();
+      document.getElementById('loading').style.display='none';
+      document.getElementById('analyzeBtn').disabled = false;
+      document.getElementById('result').style.display='block';
+      curStepEl.innerHTML = lastReport
+        ? '✅ 分析完成：<b>生成分析报告</b>'
+        : '✅ 分析完成';
+      if (!lastReport) {
+        document.getElementById('resultContent').innerHTML = '<p class="err">❌ 未获取到分析结果，请稍后重试或检查资源点是否充足。</p>';
+      } else {
+        document.getElementById('resultContent').innerHTML = '';
+        renderMarkdown(lastReport);
+      }
     }).catch(function(err){
-      if (normalDone) return;        // 已正常完成，忽略 cancel 引发的后续报错，保留报告
-      finalized = true;
-      if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
-      if (totalTimer){ clearTimeout(totalTimer); totalTimer=null; }
+      if (stepTimer){ clearInterval(stepTimer); stepTimer=null; }
       document.getElementById('loading').style.display='none';
       document.getElementById('analyzeBtn').disabled = false;
       document.getElementById('result').style.display='block';
