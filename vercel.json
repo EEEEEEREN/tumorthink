@@ -1,4 +1,10 @@
 {
+  "functions": {
+    "api/proxy.py": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
   "rewrites": [
     { "source": "/api/run", "destination": "/api/proxy" },
     { "source": "/api/stream_run", "destination": "/api/proxy" },
