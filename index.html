@@ -208,27 +208,55 @@
     curStepEl.innerHTML = '⏳ 正在准备分析…';
 
     // ==== 强健的自动收尾机制（彻底避免"卡在生成分析报告"）====
-    // 1. 空闲超时：距最后一次收到内容超过 IDLE_MS 无新内容 → 自动结束
-    // 2. 总超时：从开始分析起超过 TOTAL_MS 仍未结束 → 强制收尾
-    var IDLE_MS = 12000;     // 12 秒无新内容即认为输出完成（兼顾不误截断）
-    var TOTAL_MS = 180000;   // 最多等待 3 分钟，强制收尾兜底
-    var lastDataAt = Date.now();
-    var idleTimer = null;
-    var totalTimer = null;
+    // 后端 SSE 在内容输出完后，tail 段仍可能有内容/连接不关闭，导致 reader.done 迟迟不来、
+    // 12 秒 idle 被不断重置。因此采用"固定结尾标志 + 主动取消连接"的方式确定性收尾：
+    //   1) 检测到报告固定结尾标志 → END_IDLE_MS 内无新内容 → 主动 cancel() 收尾
+    //   2) 空闲超时：任何阶段距最后一次"内容增长"超过 IDLE_MS → 收尾
+    //   3) 总超时兜底
+    var IDLE_MS = 12000;      // 普通阶段空闲超时
+    var END_IDLE_MS = 2500;   // 已识别完成标志后的短空闲
+    var TOTAL_MS = 150000;    // 最多等待 2.5 分钟，强制收尾兜底
+    // 报告的固定结尾（COT 提示词强制），命中即认为内容输出完成
+    var COMPLETE_MARKS = ['请务必线下就医确诊','AI 辅助分析，仅供参考','仅供参考，请务必','就医确诊'];
+    var readerRef = null;     // 保存 reader，用于主动取消
+    var idleTimer = null, totalTimer = null;
     var finalized = false;
+    var normalDone = false;    // 是否已通过 doFinalize 正常完成（用于阻止 catch 覆盖报告）
+    var lastDataAt = Date.now();
+    var completeArmed = false;   // 完成标志只触发一次收尾，不被后续内容重置
 
+    function cancelReader(){
+      try { if (readerRef && readerRef.cancel){ readerRef.cancel(); } } catch(e){}
+      readerRef = null;
+    }
     function doFinalize(){
-      if (finalized) return; finalized = true;
+      if (finalized) return; finalized = true; normalDone = true;
       if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
       if (totalTimer){ clearTimeout(totalTimer); totalTimer=null; }
+      cancelReader();
       finalize();
     }
-    function kickIdleTimer(){
-      lastDataAt = Date.now();
-      if (idleTimer){ clearTimeout(idleTimer); }
+    function isComplete(){
+      for (var i=0;i<COMPLETE_MARKS.length;i++){
+        if (streamBuf.indexOf(COMPLETE_MARKS[i])>=0) return true;
+      }
+      return false;
+    }
+    function armIdle(){
+      if (isComplete()){
+        // 已检测到报告固定结尾：只 arm 一次短定时，之后不再因内容到达而重置，确保必然收尾
+        if (completeArmed) return;
+        completeArmed = true;
+        if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
+        idleTimer = setTimeout(function(){ if (!finalized) doFinalize(); }, END_IDLE_MS);
+        return;
+      }
+      // 未完成：常规空闲超时，可被持续内容重置
+      if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
       idleTimer = setTimeout(function(){
-        // 已有内容且长时间无新内容 → 判定完成，自动收尾
-        if (!finalized && streamBuf.length > 0){ doFinalize(); }
+        if (finalized) return;
+        if (streamBuf.length===0) return;      // 尚无内容，继续等待
+        doFinalize();
       }, IDLE_MS);
     }
     totalTimer = setTimeout(doFinalize, TOTAL_MS);
@@ -248,6 +276,7 @@
     }).then(function(resp){
       if (!resp.ok) return resp.text().then(function(t){ throw new Error('请求失败: '+resp.status+' '+t.slice(0,120)); });
       var reader = resp.body.getReader();
+      readerRef = reader;
       var decoder = new TextDecoder();
       var buffer = '';
       function pump(){
@@ -268,7 +297,7 @@
             if (ev.type === 'answer' && ev.content && ev.content.answer){
               streamBuf += ev.content.answer;
               spEl.textContent = streamBuf.slice(-1600);
-              kickIdleTimer();
+              armIdle();
               // 识别到的大标题推进当前步骤
               var titles = ['图像整体观察','病灶','形态','纹理','风险分级','就医','建议与就医'];
               titles.forEach(function(t){
@@ -298,6 +327,7 @@
       }
       return pump();
     }).catch(function(err){
+      if (normalDone) return;        // 已正常完成，忽略 cancel 引发的后续报错，保留报告
       finalized = true;
       if (idleTimer){ clearTimeout(idleTimer); idleTimer=null; }
       if (totalTimer){ clearTimeout(totalTimer); totalTimer=null; }
