@@ -73,7 +73,7 @@
 <div class="top">
   <h1>🫁 肿瘤图像智能分析助手</h1>
   <p>上传 jpg / png / pdf → AI 思维链(COT)分析 → 一键下载 PDF 报告</p>
-  <p style="opacity:.9;margin-top:6px">⚙️ 当前大模型：<b>豆包 Seed Lite 2.0</b>（轻量快速版）　·　<span style="opacity:.8">v4 · 非流式稳定版</span></p>
+  <p style="opacity:.9;margin-top:6px">⚙️ 当前大模型：<b>豆包 Seed Lite 2.0</b>（轻量快速版）　·　<span style="opacity:.8">v5 · 分步进度+实时计时</span></p>
 </div>
 
 <div class="wrap">
@@ -101,6 +101,7 @@
     <div id="spinner"></div>
     <div style="font-size:14px;color:#1e293b">AI 正在分步分析（思维链推理）…</div>
     <div id="currentStep" style="margin-top:14px;text-align:center;font-size:14px;font-weight:600;color:#166534;background:#e9f7ee;border:1px solid #cdeed6;border-radius:10px;padding:12px 16px"></div>
+    <div id="timerHint" style="margin-top:8px;text-align:center;font-size:12px;color:#64748b;display:none"></div>
     <div id="streamPreview" style="margin-top:12px;text-align:left;font-size:13px;color:#5a6b7f;white-space:pre-wrap;max-height:200px;overflow:auto;border-top:1px dashed #d8e0ea;padding-top:10px"></div>
   </div>
 
@@ -191,29 +192,53 @@
     var spEl = document.getElementById('streamPreview');
     spEl.textContent = '';
 
-    // 思维链步骤（细分，只高亮显示当前一步，并说明具体在干嘛）
+    // 思维链步骤（细分，每步给详细说明，让用户知道具体在干嘛）
+    var stepsDone = [];
     var steps = [
-      { title:'步骤1 · 图像整体观察',   doing:'正在读取并识别图像，分析图片类型、整体构图与可见结构…' },
-      { title:'步骤2 · 病灶定位与轮廓', doing:'正在定位可疑病灶，评估其方位、大小比例、形状与边界…' },
-      { title:'步骤3 · 形态特征分析',   doing:'正在分析颜色/灰度分布、边界规则度与形态对称性（参考ABCD）…' },
-      { title:'步骤4 · 纹理与内部结构', doing:'正在观察表面纹理、破溃、出血、结痂与内部结构特征…' },
-      { title:'步骤5 · 综合风险分级',   doing:'正在基于可见特征综合判断可疑度，给出低/中/高分级…' },
-      { title:'步骤6 · 建议与就医指引', doing:'正在归纳主要发现，整理检查方式与分科就医建议…' }
+      { title:'步骤1 · 图像整体观察',   doing:'正在读取并识别图像，判断图片类型与整体构图，留意可见病灶区域。' },
+      { title:'步骤2 · 病灶定位与轮廓', doing:'正在定位可疑病灶，评估其方位、大小比例、形状与边界是否规则。' },
+      { title:'步骤3 · 形态特征分析',   doing:'正在分析颜色/灰度分布、边界规则度与形态对称性（参考ABCD法则）。' },
+      { title:'步骤4 · 纹理与内部结构', doing:'正在观察表面纹理、破溃、出血、结痂与内部结构等细节特征。' },
+      { title:'步骤5 · 综合风险分级',   doing:'正在综合各维度特征，判断可疑度并给出低/中/高风险分级。' },
+      { title:'步骤6 · 建议与就医指引', doing:'正在归纳主要发现，整理检查方式与分科就医建议。' }
     ];
     var stepIdx = -1;  // 当前已推进到的步骤下标
     var curStepEl = document.getElementById('currentStep');
     curStepEl.style.display = 'block';
     curStepEl.innerHTML = '⏳ 正在准备分析…';
 
-    // 只显示当前进行到的一步，说明"具体在干嘛"
+    // 同时更新"倒计时 + 已用秒数"的提示行（告诉用户"没卡死，在正常工作"）
+    var timerEl = document.getElementById('timerHint');
+    if (timerEl){ timerEl.style.display = 'block'; timerEl.textContent = '⏱ 已用时 0 秒 · AI 正在分析，通常需 5~20 秒'; }
+
+    // 显示当前进行到的一步（前面步骤标记为已完成，让用户看到进度在走）
     function showCurrentStep(){
       var cur = (stepIdx>=0 && stepIdx<steps.length) ? steps[stepIdx] : steps[0];
-      curStepEl.innerHTML = '⏳ 当前进行：<b>' + cur.title + '</b><div style="font-weight:400;font-size:12.5px;color:#556a62;margin-top:5px">' + cur.doing + '</div>';
+      var before = stepIdx > 0
+        ? '<div style="font-weight:400;font-size:11.5px;color:#3d8b6b;margin-top:3px">已完成：'
+          + steps.slice(0, stepIdx).map(function(s){ return s.title.replace(/^步骤\d+ · /,''); }).join(' → ')
+          + '</div>'
+        : '';
+      curStepEl.innerHTML = '⏳ 当前进行：<b>' + cur.title + '</b>'
+        + '<div style="font-weight:400;font-size:12.5px;color:#556a62;margin-top:5px">' + cur.doing + '</div>'
+        + before;
     }
     showCurrentStep();
 
-    // 等待期间按时间推进步骤动画，让用户实时感知"在干嘛"
-    var PROGRESS_STEP_MS = parseInt(spEl.getAttribute('data-step') || '0', 10) || 2600;
+    // 等待期间按时间推进步骤动画（每步约 1.4 秒，让节奏更快更均匀，避免"最后一步干等太久"）
+    var PROGRESS_STEP_MS = Math.min(parseInt(spEl.getAttribute('data-step') || '0', 10) || 2600, 1400);
+    var startTs = Date.now();
+    // 实时秒数计时器，让用户明确看到"还在跑、没卡死"
+    var tickTimer = setInterval(function(){
+      var sec = Math.max(0, Math.round((Date.now() - startTs)/1000));
+      if (timerEl){ timerEl.textContent = '⏱ 已用时 ' + sec + ' 秒 · AI 正在分析，通常需 5~20 秒'; }
+      // 若所有步骤已走完，仍停留在最后一步，提示正在生成最终报告
+      if (stepIdx >= steps.length-1){
+        curStepEl.innerHTML = '⏳ <b>正在生成分析报告…</b>'
+          + '<div style="font-weight:400;font-size:12.5px;color:#556a62;margin-top:5px">已完成全部 ' + steps.length
+          + ' 个分析步骤，正在汇总结果（已用时 ' + sec + ' 秒，请稍候）…</div>';
+      }
+    }, 500);
     var stepTimer = setInterval(function(){
       if (stepIdx < steps.length-1){ stepIdx++; showCurrentStep(); }
     }, PROGRESS_STEP_MS);
@@ -231,6 +256,7 @@
       return resp.json();
     }).then(function(data){
       if (stepTimer){ clearInterval(stepTimer); stepTimer=null; }
+      if (tickTimer){ clearInterval(tickTimer); tickTimer=null; }
       // 从返回的 messages 中提取最后一条 AI 消息的内容（即完整报告 markdown）
       var report = '';
       var msgs = (data && data.messages) ? data.messages : [];
@@ -244,6 +270,7 @@
       }
       lastReport = report.trim();
       document.getElementById('loading').style.display='none';
+      if (timerEl){ timerEl.style.display='none'; }
       document.getElementById('analyzeBtn').disabled = false;
       document.getElementById('result').style.display='block';
       curStepEl.innerHTML = lastReport
@@ -257,6 +284,8 @@
       }
     }).catch(function(err){
       if (stepTimer){ clearInterval(stepTimer); stepTimer=null; }
+      if (tickTimer){ clearInterval(tickTimer); tickTimer=null; }
+      if (timerEl){ timerEl.style.display='none'; }
       document.getElementById('loading').style.display='none';
       document.getElementById('analyzeBtn').disabled = false;
       document.getElementById('result').style.display='block';
